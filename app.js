@@ -26,7 +26,7 @@
 
   /* ---------- Google sign-in (token lives in this tab's session only) ---------- */
   const SCOPE = "https://www.googleapis.com/auth/youtube";
-  const DEFAULT_CLIENT_ID = ""; // optional: paste your OAuth client ID here to skip entering it in Settings
+  const DEFAULT_CLIENT_ID = "117832122780-ea8f6vhegjdbb8r1d0m7m12ulnl30oat.apps.googleusercontent.com"; // public OAuth client ID (not a secret)
   function clientId() { return ls("tb.clientId") || DEFAULT_CLIENT_ID; }
   function getToken() {
     try { const t = JSON.parse(sessionStorage.getItem("tb.token") || "null"); return t && t.exp > Date.now() + 60000 ? t.value : ""; } catch (e) { return ""; }

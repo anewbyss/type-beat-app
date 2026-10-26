@@ -1,6 +1,6 @@
 // Type Beat service worker: caches the app shell so it opens offline.
 // YouTube API calls always go to the network.
-const CACHE = "type-beat-v3";
+const CACHE = "type-beat-v4";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "manifest.webmanifest", "icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
