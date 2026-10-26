@@ -19,7 +19,14 @@
 <body>
 <div class="wrap">
 <header>
-  <div class="brand"><h1>Type<span>/</span>Beat</h1><button class="btn small ghost" id="open-settings" aria-label="Settings">Settings</button></div>
+  <div class="brand"><h1>Type<span>/</span>Beat</h1>
+    <div class="actions">
+      <span class="who" id="who" hidden></span>
+      <button class="btn small" id="signin-btn" hidden>Sign in with Google</button>
+      <button class="btn small ghost" id="signout-btn" hidden>Sign out</button>
+      <button class="btn small ghost" id="open-settings" aria-label="Settings">Settings</button>
+    </div>
+  </div>
   <div class="tabs" role="tablist">
     <button class="tab" role="tab" id="tab-scout" aria-selected="true" aria-controls="view-scout">Scout</button>
     <button class="tab" role="tab" id="tab-crate" aria-selected="false" aria-controls="view-crate">Crate<span class="n" id="crate-count">0</span></button>
@@ -30,9 +37,9 @@
 <!-- ============ SCOUT ============ -->
 <div id="view-scout" role="tabpanel">
   <div class="banner" id="key-banner" hidden>
-    <strong>Add your YouTube API key to start scouting.</strong>
-    <span>It stays on this device only.</span>
-    <button class="btn small primary" id="banner-settings">Add key</button>
+    <strong>Sign in with Google or add an API key to start scouting.</strong>
+    <span>Your sign-in and key stay on this device only.</span>
+    <button class="btn small primary" id="banner-settings">Set up</button>
   </div>
 
   <form class="panel" id="scout-form" novalidate>
@@ -48,9 +55,22 @@
     <div class="recent" id="recent"></div>
   </form>
 
+  <section class="panel" id="mine" hidden>
+    <h3>From my YouTube</h3>
+    <p class="note">Scan your own account for beats with free downloads. These scans use very little quota.</p>
+    <div class="actions"><button type="button" class="btn" id="scan-likes">Scan my liked videos</button></div>
+    <div class="row">
+      <label for="my-playlists">My playlists<select id="my-playlists"><option value="">Choose a playlist…</option></select></label>
+      <label for="my-subs">Channels I follow<select id="my-subs"><option value="">Choose a channel…</option></select></label>
+    </div>
+  </section>
+
   <div class="resultbar" id="resultbar" hidden>
     <span id="result-summary"></span>
-    <button type="button" class="chip" id="only-free" aria-pressed="false">Only free downloads</button>
+    <div class="chips">
+      <button type="button" class="chip" id="only-beats" aria-pressed="false" hidden>Only beats</button>
+      <button type="button" class="chip" id="only-free" aria-pressed="false">Only free downloads</button>
+    </div>
   </div>
   <p class="note" id="scout-msg"></p>
   <div class="list" id="results"></div>
@@ -68,7 +88,7 @@
       </div>
       <div class="row3">
         <label for="f-artist">Type of<input id="f-artist" placeholder="Artist"></label>
-        <label for="f-bpm">BPM<input id="f-bpm" inputmode="numeric"></label>
+        <label for="f-bpm">BPM<span class="inline"><input id="f-bpm" inputmode="numeric"><button type="button" class="btn small" id="f-tap">Tap</button></span></label>
         <label for="f-key">Key<input id="f-key" placeholder="A min"></label>
       </div>
       <div class="row">
@@ -95,6 +115,10 @@
 
 <!-- ============ CRATE ============ -->
 <div id="view-crate" role="tabpanel" hidden>
+  <div class="banner sync" id="sync-bar" hidden>
+    <span id="sync-text">Keep your crate as a private YouTube playlist.</span>
+    <button class="btn small primary" id="sync-btn">Sync to YouTube</button>
+  </div>
   <div class="filters">
     <input class="q" id="q" placeholder="Search titles, producers, tags, notes" aria-label="Search crate">
     <select id="fl-license" aria-label="Filter by license">
@@ -104,7 +128,14 @@
       <option value="new">Newest saved</option><option value="rating">Top rated</option><option value="bpm">BPM, low to high</option><option value="artist">By artist</option>
     </select>
   </div>
-  <div class="chips"><button type="button" class="chip" id="fl-dl" aria-pressed="false">Has download link</button></div>
+  <div class="actions bpm-filter">
+    <button type="button" class="chip" id="fl-dl" aria-pressed="false">Has download link</button>
+    <span class="lbl">BPM</span>
+    <input id="fl-bpm-min" inputmode="numeric" placeholder="min" aria-label="Lowest BPM">
+    <span class="lbl">to</span>
+    <input id="fl-bpm-max" inputmode="numeric" placeholder="max" aria-label="Highest BPM">
+    <button type="button" class="chip" id="fl-bpm-tap">Tap to find BPM</button>
+  </div>
   <div class="list" id="list"></div>
 </div>
 </main>
@@ -114,6 +145,14 @@
 <dialog id="settings">
   <form method="dialog" class="formgrid" id="settings-form">
     <h2>Settings</h2>
+    <h3>Google sign-in</h3>
+    <label for="client-id">OAuth client ID<input id="client-id" autocomplete="off" placeholder="…apps.googleusercontent.com"></label>
+    <p class="note">From Google Cloud Console → Clients. This ID isn't secret; it only tells Google which app is asking.</p>
+    <div class="actions"><button type="button" class="btn primary" id="save-client">Save and sign in</button></div>
+    <label class="check"><input type="checkbox" id="auto-sync" checked> Add beats I save to my YouTube playlist</label>
+    <p class="note" id="client-msg"></p>
+    <hr>
+    <h3>API key (optional when signed in)</h3>
     <label for="api-key">YouTube API key<input id="api-key" type="password" autocomplete="off" placeholder="AIza…"></label>
     <p class="note">Saved only in this browser on this device. It never goes into the app's code or anywhere except Google.</p>
     <div class="actions"><button type="button" class="btn primary" id="save-key">Save and test</button><button type="button" class="btn ghost" id="show-key">Show</button></div>
@@ -130,10 +169,24 @@
 
 <dialog id="player">
   <div class="player-frame" id="player-frame"></div>
-  <form method="dialog" class="actions" style="padding:12px"><button class="btn" value="close">Close</button></form>
+  <div class="tapper">
+    <div class="tap-head"><h3>BPM tracker</h3><span class="note" id="tap-for"></span></div>
+    <button type="button" class="tap-pad" id="tap-pad">
+      <span class="tap-bpm" id="tap-bpm">—</span><span class="tap-unit">BPM</span>
+      <span class="tap-hint" id="tap-hint">Tap here on every beat</span>
+    </button>
+    <div class="actions">
+      <button type="button" class="btn small" id="tap-half">÷2</button>
+      <button type="button" class="btn small" id="tap-double">×2</button>
+      <button type="button" class="btn small ghost" id="tap-reset">Reset</button>
+      <button type="button" class="btn small primary" id="tap-save" disabled>Save BPM</button>
+    </div>
+  </div>
+  <form method="dialog" class="actions" style="padding:0 16px 16px"><button class="btn" value="close">Close</button></form>
 </dialog>
 
 <div class="toast" id="toast" hidden></div>
+<script src="https://accounts.google.com/gsi/client" async></script>
 <script src="app.js"></script>
 </body>
 </html>

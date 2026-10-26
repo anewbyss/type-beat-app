@@ -24,21 +24,69 @@
   function videoId(u) { const m = String(u).match(/(?:youtu\.be\/|v=|shorts\/|embed\/|live\/)([A-Za-z0-9_-]{11})/); return m ? m[1] : ""; }
   function thumb(id) { return "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg"; }
 
+  /* ---------- Google sign-in (token lives in this tab's session only) ---------- */
+  const SCOPE = "https://www.googleapis.com/auth/youtube";
+  const DEFAULT_CLIENT_ID = ""; // optional: paste your OAuth client ID here to skip entering it in Settings
+  function clientId() { return ls("tb.clientId") || DEFAULT_CLIENT_ID; }
+  function getToken() {
+    try { const t = JSON.parse(sessionStorage.getItem("tb.token") || "null"); return t && t.exp > Date.now() + 60000 ? t.value : ""; } catch (e) { return ""; }
+  }
+  function setToken(value, secs) {
+    try { if (value) sessionStorage.setItem("tb.token", JSON.stringify({ value, exp: Date.now() + secs * 1000 })); else sessionStorage.removeItem("tb.token"); } catch (e) {}
+  }
+  let tokenClient = null; let pendingSignIn = null;
+  function gisReady() { return !!(window.google && google.accounts && google.accounts.oauth2); }
+  function waitForGis(ms = 8000) {
+    return new Promise((res, rej) => { const t0 = Date.now(); (function poll() { if (gisReady()) return res(); if (Date.now() - t0 > ms) return rej(new ApiError("Google sign-in didn't load. Check your connection or turn off content blockers for this site.")); setTimeout(poll, 150); })(); });
+  }
+  async function signIn(silent) {
+    const id = clientId();
+    if (!id) { openSettings(); throw new ApiError("Add your OAuth client ID in Settings first."); }
+    await waitForGis();
+    if (!tokenClient || tokenClient._id !== id) {
+      tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: id, scope: SCOPE,
+        callback: (r) => {
+          const p = pendingSignIn; pendingSignIn = null; if (!p) return;
+          if (r && r.access_token) { setToken(r.access_token, +r.expires_in || 3600); p.res(r.access_token); }
+          else p.rej(new ApiError("Sign-in didn't finish" + (r && r.error ? " (" + r.error + ")." : ".")));
+        },
+        error_callback: (e) => {
+          const p = pendingSignIn; pendingSignIn = null; if (!p) return;
+          p.rej(new ApiError(e && e.type === "popup_closed" ? "Sign-in window was closed." : e && e.type === "popup_failed_to_open" ? "Your browser blocked the sign-in window. Allow pop-ups for this site and try again." : "Sign-in failed. Try again."));
+        }
+      });
+      tokenClient._id = id;
+    }
+    return new Promise((res, rej) => { pendingSignIn = { res, rej }; tokenClient.requestAccessToken(silent ? { prompt: "" } : {}); });
+  }
+  function signOut() {
+    const t = getToken(); setToken(null); ls("tb.me", null);
+    if (t && gisReady()) try { google.accounts.oauth2.revoke(t, () => {}); } catch (e) {}
+    updateAuthUI(); toast("Signed out");
+  }
+
   /* ---------- YouTube API ---------- */
   class ApiError extends Error {}
-  async function yt(path, params) {
-    const key = getKey();
-    if (!key) throw new ApiError("Add your YouTube API key in Settings first.");
-    const qs = new URLSearchParams({ ...params, key });
+  async function yt(path, params, opts = {}) {
+    const token = getToken(); const key = getKey();
+    if (opts.auth && !token) throw new ApiError("Sign in with Google first.");
+    if (!token && !key) throw new ApiError("Sign in with Google or add a YouTube API key in Settings first.");
+    const qs = new URLSearchParams(params || {}); if (!token) qs.set("key", key);
+    const init = { method: opts.method || "GET", headers: {} };
+    if (token) init.headers.Authorization = "Bearer " + token;
+    if (opts.body) { init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(opts.body); }
     let res;
-    try { res = await fetch(API + path + "?" + qs); }
+    try { res = await fetch(API + path + "?" + qs, init); }
     catch (e) { throw new ApiError("Couldn't reach YouTube. Check your connection and try again."); }
-    const data = await res.json().catch(() => ({}));
+    const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
     if (!res.ok) {
       const err = data.error || {};
       const reason = (err.errors && err.errors[0] && err.errors[0].reason) || (err.details && err.details[0] && err.details[0].reason) || "";
       const msg = String(err.message || "");
+      if (res.status === 401) { setToken(null); updateAuthUI(); throw new ApiError("Your Google sign-in expired. Tap “Sign in with Google” again."); }
       if (/quota/i.test(reason)) throw new ApiError("You've used today's free YouTube quota. It resets at midnight Pacific time.");
+      if (/insufficientPermissions|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(reason)) throw new ApiError("Google didn't grant YouTube access. Sign out, sign in again, and tick the YouTube box when asked.");
       if (/keyInvalid|API_KEY_INVALID/i.test(reason) || /API key not valid/i.test(msg)) throw new ApiError("Google says this API key isn't valid. Copy it again from Google Cloud Console → Credentials.");
       if (/accessNotConfigured|SERVICE_DISABLED/i.test(reason) || /has not been used|is disabled/i.test(msg)) throw new ApiError("YouTube Data API v3 isn't turned on for this key's project. Enable it in Google Cloud Console → APIs & Services → Library.");
       if (/REFERRER|referer/i.test(reason + msg)) throw new ApiError("This key is restricted to other websites. In Credentials, add " + location.origin + "/* under Website restrictions.");
@@ -110,7 +158,41 @@
 
   /* ---------- Settings ---------- */
   const dlg = $("#settings");
-  function openSettings() { $("#api-key").value = getKey(); $("#key-msg").textContent = ""; $("#backup-msg").textContent = ""; dlg.showModal(); }
+  function openSettings() {
+    $("#api-key").value = getKey(); $("#client-id").value = clientId(); $("#auto-sync").checked = ls("tb.autoSync") !== false;
+    $("#key-msg").textContent = ""; $("#backup-msg").textContent = ""; $("#client-msg").textContent = "";
+    if (!dlg.open) dlg.showModal();
+  }
+  $("#auto-sync").onchange = (e) => ls("tb.autoSync", e.target.checked);
+  $("#save-client").onclick = async () => {
+    const id = $("#client-id").value.trim(); const m = $("#client-msg"); m.className = "note";
+    if (id && !/\.apps\.googleusercontent\.com$/.test(id)) { m.className = "note err"; m.textContent = "That doesn't look like a client ID. It ends in .apps.googleusercontent.com."; return; }
+    ls("tb.clientId", id || null);
+    if (!id) { m.textContent = "Client ID removed."; updateAuthUI(); return; }
+    m.innerHTML = '<span class="spinner"></span> Opening Google sign-in…';
+    try { await doSignIn(); m.textContent = "Signed in. You're ready to scout."; }
+    catch (e) { m.className = "note err"; m.textContent = e.message; }
+  };
+
+  /* ---------- Auth UI ---------- */
+  async function doSignIn() {
+    await signIn(false);
+    try {
+      const d = await yt("channels", { part: "snippet,contentDetails", mine: "true" }, { auth: true });
+      const ch = (d.items || [])[0];
+      ls("tb.me", ch ? { name: ch.snippet.title, likes: ((ch.contentDetails || {}).relatedPlaylists || {}).likes || "LL" } : { name: "your account", likes: "LL" });
+    } catch (e) { ls("tb.me", { name: "your account", likes: "LL" }); }
+    updateAuthUI(); loadMine(); toast("Signed in");
+  }
+  function updateAuthUI() {
+    const signed = !!getToken(); const me = ls("tb.me");
+    $("#signin-btn").hidden = signed || !clientId(); $("#signout-btn").hidden = !signed;
+    $("#who").hidden = !signed; $("#who").textContent = signed && me ? me.name : "";
+    $("#mine").hidden = !signed; $("#sync-bar").hidden = !signed;
+    updateBanner(); updateSyncText();
+  }
+  $("#signin-btn").onclick = async () => { try { await doSignIn(); } catch (e) { toast(e.message); } };
+  $("#signout-btn").onclick = signOut;
   $("#open-settings").onclick = openSettings;
   $("#banner-settings").onclick = openSettings;
   $("#show-key").onclick = () => { const i = $("#api-key"); const s = i.type === "password"; i.type = s ? "text" : "password"; $("#show-key").textContent = s ? "Hide" : "Show"; };
@@ -121,8 +203,7 @@
     try { await yt("videos", { part: "id", id: "jNQXAC9IVRw" }); m.textContent = "Key works. You're ready to scout."; }
     catch (e) { m.className = "note err"; m.textContent = e.message; }
   };
-  function updateBanner() { $("#key-banner").hidden = !!getKey(); }
-  updateBanner();
+  function updateBanner() { $("#key-banner").hidden = !!getKey() || !!getToken(); }
 
   $("#export-btn").onclick = () => {
     const blob = new Blob([JSON.stringify({ app: "type-beat", exported: new Date().toISOString(), crate: ls("tb.crate") || {} }, null, 2)], { type: "application/json" });
@@ -169,34 +250,76 @@
     const artist = $("#artist").value.trim(); const msg = $("#scout-msg"); msg.className = "note";
     if (!more) {
       if (!artist) { msg.textContent = "Type an artist name to scout."; return; }
-      if (!getKey()) { openSettings(); return; }
-      lastQuery = { artist, params: buildQuery(artist, mods()) }; results = []; nextToken = null;
+      if (!getKey() && !getToken()) { openSettings(); return; }
+      lastQuery = { kind: "search", artist, params: buildQuery(artist, mods()) }; results = []; nextToken = null;
       let r = (ls("tb.recent") || []).filter((x) => x.toLowerCase() !== artist.toLowerCase()); r.unshift(artist); ls("tb.recent", r.slice(0, 8)); renderRecent();
     }
-    scouting = true; const btn = more ? $("#more-btn") : $("#scout-btn"); const label = btn.textContent;
-    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Scouting';
-    msg.textContent = more ? "" : "Searching YouTube and reading descriptions…";
+    await runQuery(more, more ? $("#more-btn") : $("#scout-btn"), "Searching YouTube and reading descriptions…");
+  }
+  async function runQuery(more, btn, busyText) {
+    const msg = $("#scout-msg"); msg.className = "note";
+    scouting = true; const label = btn.textContent;
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> ' + (lastQuery.kind === "search" ? "Scouting" : "Scanning");
+    msg.textContent = more ? "" : busyText;
     try {
-      const params = { ...lastQuery.params }; if (more && nextToken) params.pageToken = nextToken;
-      const s = await yt("search", params); nextToken = s.nextPageToken || null;
-      const ids = (s.items || []).map((i) => i.id && i.id.videoId).filter(Boolean);
-      const vids = await videoDetails(ids);
-      const byId = Object.fromEntries(vids.map((v) => [v.id, v]));
-      ids.forEach((id) => {
-        const v = byId[id]; if (!v || results.some((r) => r.videoId === id)) return;
-        const sn = v.snippet || {};
-        results.push({
-          videoId: id, title: sn.title || "", channel: sn.channelTitle || "", published: sn.publishedAt,
-          views: (v.statistics || {}).viewCount, description: sn.description || "", artist: lastQuery.artist,
-          read: readDescription(sn.description, sn.title), thumb: (sn.thumbnails && (sn.thumbnails.medium || sn.thumbnails.default) || {}).url || thumb(id)
-        });
-      });
-      msg.textContent = results.length ? "" : "No beats found. Try fewer filters or a different spelling.";
-    } catch (e) { msg.className = "note err"; msg.textContent = e.message; }
+      let ids;
+      if (lastQuery.kind === "search") {
+        const params = { ...lastQuery.params }; if (more && nextToken) params.pageToken = nextToken;
+        const s = await yt("search", params); nextToken = s.nextPageToken || null;
+        ids = (s.items || []).map((i) => i.id && i.id.videoId).filter(Boolean);
+      } else {
+        const params = { part: "contentDetails", playlistId: lastQuery.playlistId, maxResults: 50 }; if (more && nextToken) params.pageToken = nextToken;
+        const s = await yt("playlistItems", params, { auth: true }); nextToken = s.nextPageToken || null;
+        ids = (s.items || []).map((i) => i.contentDetails && i.contentDetails.videoId).filter(Boolean);
+      }
+      addResults(await videoDetails(ids), ids);
+      msg.textContent = results.length ? "" : lastQuery.kind === "search" ? "No beats found. Try fewer filters or a different spelling." : "Nothing in " + lastQuery.label + " yet.";
+    } catch (e) { msg.className = "note err"; msg.textContent = /404|not found/i.test(e.message) ? "YouTube couldn't open " + (lastQuery.label || "that list") + ". It may be private or empty." : e.message; }
     finally { scouting = false; btn.disabled = false; btn.textContent = label; renderResults(); }
   }
+  function addResults(vids, order) {
+    const byId = Object.fromEntries(vids.map((v) => [v.id, v]));
+    order.forEach((id) => {
+      const v = byId[id]; if (!v || results.some((r) => r.videoId === id)) return;
+      const sn = v.snippet || {};
+      results.push({
+        videoId: id, title: sn.title || "", channel: sn.channelTitle || "", published: sn.publishedAt,
+        views: (v.statistics || {}).viewCount, description: sn.description || "", artist: lastQuery.artist || "",
+        read: readDescription(sn.description, sn.title), thumb: (sn.thumbnails && (sn.thumbnails.medium || sn.thumbnails.default) || {}).url || thumb(id)
+      });
+    });
+  }
   $("#scout-form").addEventListener("submit", (e) => { e.preventDefault(); scout(false); });
-  $("#more-btn").onclick = () => scout(true);
+  $("#more-btn").onclick = () => { if (!scouting && lastQuery) runQuery(true, $("#more-btn"), ""); };
+
+  /* ---------- From my YouTube ---------- */
+  async function scanList(playlistId, label, btn) {
+    if (scouting) return;
+    if (!getToken()) { toast("Sign in with Google first."); updateAuthUI(); return; }
+    lastQuery = { kind: "playlist", playlistId, label, artist: "" }; results = []; nextToken = null;
+    $("#only-beats").setAttribute("aria-pressed", "true");
+    await runQuery(false, btn, "Reading " + label + "…");
+    $("#resultbar").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  $("#scan-likes").onclick = (e) => { const me = ls("tb.me") || {}; scanList(me.likes || "LL", "your liked videos", e.currentTarget); };
+  $("#my-playlists").onchange = (e) => { const s = e.target; if (!s.value) return; scanList(s.value, s.options[s.selectedIndex].text, $("#scan-likes")); s.value = ""; };
+  $("#my-subs").onchange = (e) => { const s = e.target; if (!s.value) return; scanList("UU" + s.value.slice(2), s.options[s.selectedIndex].text + "'s uploads", $("#scan-likes")); s.value = ""; };
+  async function loadMine() {
+    if (!getToken()) return;
+    try {
+      const pl = await yt("playlists", { part: "snippet", mine: "true", maxResults: 50 }, { auth: true });
+      const own = ls("tb.playlistId");
+      $("#my-playlists").innerHTML = '<option value="">Choose a playlist…</option>' + (pl.items || []).filter((p) => p.id !== own).map((p) => `<option value="${esc(p.id)}">${esc(p.snippet.title)}</option>`).join("");
+      let subs = [], tok = "";
+      for (let i = 0; i < 4; i++) {
+        const s = await yt("subscriptions", { part: "snippet", mine: "true", maxResults: 50, order: "alphabetical", ...(tok ? { pageToken: tok } : {}) }, { auth: true });
+        subs = subs.concat(s.items || []); tok = s.nextPageToken; if (!tok) break;
+      }
+      $("#my-subs").innerHTML = '<option value="">Choose a channel…</option>' + subs.map((s) => `<option value="${esc(s.snippet.resourceId.channelId)}">${esc(s.snippet.title)}</option>`).join("");
+    } catch (e) { $("#scout-msg").className = "note err"; $("#scout-msg").textContent = e.message; }
+  }
+  const BEATY = /beat|instrumental|\bprod\b|prod\.|type\s*beat|freestyle|\binstru\b|riddim|bpm/i;
+  $("#only-beats").onclick = (e) => { const c = e.currentTarget; c.setAttribute("aria-pressed", c.getAttribute("aria-pressed") !== "true"); renderResults(); };
   $("#only-free").onclick = (e) => { const c = e.currentTarget; c.setAttribute("aria-pressed", c.getAttribute("aria-pressed") !== "true"); renderResults(); };
 
   function licenseChips(read, credit) {
@@ -206,11 +329,15 @@
   function renderResults() {
     const box = $("#results"); const onlyFree = $("#only-free").getAttribute("aria-pressed") === "true";
     $("#resultbar").hidden = !results.length; $("#more-btn").hidden = !nextToken || !results.length;
+    const fromAccount = lastQuery && lastQuery.kind === "playlist";
+    $("#only-beats").hidden = !fromAccount;
     if (!results.length) { box.innerHTML = ""; return; }
-    const freeCount = results.filter((r) => r.read.freeDL).length;
-    $("#result-summary").textContent = results.length + " beats · " + freeCount + " with a free download link";
-    const list = onlyFree ? results.filter((r) => r.read.freeDL) : results;
-    if (!list.length) { box.innerHTML = '<div class="empty"><strong>No free download links yet</strong>Load more results or turn off the filter.</div>'; return; }
+    const onlyBeats = fromAccount && $("#only-beats").getAttribute("aria-pressed") === "true";
+    const pool = onlyBeats ? results.filter((r) => BEATY.test(r.title + " " + r.description.slice(0, 300))) : results;
+    const freeCount = pool.filter((r) => r.read.freeDL).length;
+    $("#result-summary").textContent = (fromAccount ? lastQuery.label + ": " : "") + pool.length + (onlyBeats ? " beats" : " videos") + " · " + freeCount + " with a free download link";
+    const list = onlyFree ? pool.filter((r) => r.read.freeDL) : pool;
+    if (!list.length) { box.innerHTML = '<div class="empty"><strong>Nothing matches yet</strong>' + (nextToken ? "Load more results or turn off a filter." : "Turn off a filter to see everything.") + '</div>'; return; }
     box.innerHTML = list.map((r) => {
       const saved = savedByVideo(r.videoId);
       const links = r.read.links.slice(0, 3).map((l) => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${l.free ? "⬇ " : ""}${esc(l.url.replace(/^https?:\/\//, "").slice(0, 60))}</a>`).join("");
@@ -228,22 +355,126 @@
   $("#results").addEventListener("click", (e) => {
     const p = e.target.closest("[data-play]"); if (p) { play(p.dataset.play); return; }
     const s = e.target.closest("[data-save]"); if (!s) return;
-    const r = results.find((x) => x.videoId === s.dataset.save); if (!r) return;
+    const r = results.find((x) => x.videoId === s.dataset.save); if (r) saveResult(r, {});
+  });
+  function saveResult(r, extra) {
+    if (savedByVideo(r.videoId)) { toast("Already in your crate"); return; }
     saveBeat(newId(), {
       url: "https://www.youtube.com/watch?v=" + r.videoId, videoId: r.videoId, title: r.title,
       producer: r.read.producer || r.channel, channel: r.channel, artist: r.artist, bpm: parseInt(r.read.bpm, 10) || null, key: r.read.key,
       license: r.read.license, download: (r.read.links.find((l) => l.free) || {}).url || "", links: r.read.links,
-      tags: [], project: "", notes: "", credit: r.read.credit, description: r.description.slice(0, 5000), rating: 0, savedAt: new Date().toISOString()
+      tags: [], project: "", notes: "", credit: r.read.credit, description: r.description.slice(0, 5000), rating: 0, savedAt: new Date().toISOString(), ...extra
     });
-    toast("Saved to crate");
-  });
+    toast("Saved to crate" + (extra.bpmTapped ? " at " + r.read.bpm + " BPM" : "")); autoAdd(r.videoId);
+  }
 
-  /* ---------- Player ---------- */
+  /* ---------- Sync crate to a YouTube playlist ---------- */
+  const PLAYLIST_TITLE = "Type Beat Crate";
+  async function ensurePlaylist() {
+    let id = ls("tb.playlistId");
+    if (id) {
+      const d = await yt("playlists", { part: "id", id }, { auth: true });
+      if ((d.items || []).length) return id;
+    }
+    const mine = await yt("playlists", { part: "snippet", mine: "true", maxResults: 50 }, { auth: true });
+    const found = (mine.items || []).find((p) => p.snippet.title === PLAYLIST_TITLE);
+    if (found) { ls("tb.playlistId", found.id); return found.id; }
+    const created = await yt("playlists", { part: "snippet,status" }, { auth: true, method: "POST", body: {
+      snippet: { title: PLAYLIST_TITLE, description: "Beats saved in the Type Beat app." }, status: { privacyStatus: "private" } } });
+    ls("tb.playlistId", created.id); return created.id;
+  }
+  async function playlistVideoIds(pid) {
+    const ids = new Set(); let tok = "";
+    for (let i = 0; i < 20; i++) {
+      const d = await yt("playlistItems", { part: "contentDetails", playlistId: pid, maxResults: 50, ...(tok ? { pageToken: tok } : {}) }, { auth: true });
+      (d.items || []).forEach((it) => ids.add(it.contentDetails.videoId)); tok = d.nextPageToken; if (!tok) break;
+    }
+    return ids;
+  }
+  async function insertIntoPlaylist(pid, vid) {
+    await yt("playlistItems", { part: "snippet" }, { auth: true, method: "POST", body: { snippet: { playlistId: pid, resourceId: { kind: "youtube#video", videoId: vid } } } });
+  }
+  function updateSyncText() {
+    const s = ls("tb.lastSync"); const el = $("#sync-text");
+    el.textContent = s ? `Crate playlist “${PLAYLIST_TITLE}” · last synced ${ago(s.at)} · ${s.count} beats` : "Keep your crate as a private YouTube playlist.";
+  }
+  let syncing = false;
+  async function syncCrate() {
+    if (syncing) return; syncing = true; const btn = $("#sync-btn"); btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Syncing';
+    try {
+      const pid = await ensurePlaylist(); const have = await playlistVideoIds(pid);
+      const missing = [...new Set(beats.map((b) => b.videoId).filter(Boolean))].filter((v) => !have.has(v));
+      let added = 0;
+      for (const v of missing) {
+        try { await insertIntoPlaylist(pid, v); have.add(v); added++; btn.innerHTML = `<span class="spinner"></span> ${added}/${missing.length}`; }
+        catch (e) { if (/quota|expired|Sign in/i.test(e.message)) throw e; }
+      }
+      ls("tb.lastSync", { at: new Date().toISOString(), count: have.size }); updateSyncText();
+      toast(added ? `Added ${added} beat${added > 1 ? "s" : ""} to your YouTube playlist` : "Playlist already up to date");
+    } catch (e) { toast(e.message); }
+    finally { syncing = false; btn.disabled = false; btn.textContent = "Sync to YouTube"; }
+  }
+  $("#sync-btn").onclick = syncCrate;
+  async function autoAdd(vid) {
+    if (!vid || !getToken() || ls("tb.autoSync") === false) return;
+    try { const pid = await ensurePlaylist(); await insertIntoPlaylist(pid, vid); const s = ls("tb.lastSync"); ls("tb.lastSync", { at: new Date().toISOString(), count: s ? s.count + 1 : 1 }); updateSyncText(); }
+    catch (e) { toast("Saved here, but not added to YouTube: " + e.message); }
+  }
+
+  /* ---------- Player + BPM tracker ---------- */
+  // target says where a tapped BPM gets saved: a crate beat, a search result, the add form, or the crate filter.
+  let tapTarget = null; let taps = []; let tapBpm = 0;
   function play(id) {
-    $("#player-frame").innerHTML = `<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?autoplay=1&rel=0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen title="Beat preview"></iframe>`;
+    const inCrate = savedByVideo(id);
+    openPlayer(id, inCrate ? { kind: "crate", id: inCrate.id } : { kind: "result", videoId: id });
+  }
+  function openPlayer(videoId, target) {
+    tapTarget = target; resetTaps();
+    const frame = $("#player-frame");
+    frame.hidden = !videoId;
+    frame.innerHTML = videoId ? `<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0&playsinline=1" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen title="Beat preview"></iframe>` : "";
+    const forText = { crate: "Saves to this beat in your crate", result: "Saves this beat to your crate with its BPM", form: "Fills in the BPM on the form", filter: "Sets the crate's BPM range around it" }[target.kind];
+    $("#tap-for").textContent = videoId ? forText : "Play the beat anywhere, then tap along. " + forText + ".";
+    $("#tap-save").textContent = target.kind === "result" ? "Save beat with BPM" : target.kind === "filter" ? "Find beats near this BPM" : "Save BPM";
     $("#player").showModal();
   }
-  $("#player").addEventListener("close", () => ($("#player-frame").innerHTML = ""));
+  function resetTaps() { taps = []; tapBpm = 0; $("#tap-bpm").textContent = "—"; $("#tap-hint").textContent = "Tap here on every beat"; $("#tap-save").disabled = true; }
+  function showBpm() {
+    $("#tap-bpm").textContent = tapBpm ? Math.round(tapBpm) : "—";
+    $("#tap-save").disabled = !tapBpm;
+  }
+  function tap() {
+    const now = performance.now();
+    if (taps.length && now - taps[taps.length - 1] > 2500) taps = []; // a long pause starts a fresh count
+    taps.push(now); if (taps.length > 16) taps.shift();
+    const pad = $("#tap-pad"); pad.classList.add("flash"); setTimeout(() => pad.classList.remove("flash"), 80);
+    if (taps.length < 4) { $("#tap-hint").textContent = "Keep tapping… " + (4 - taps.length) + " more"; return; }
+    // Median interval ignores the odd early or late tap.
+    const gaps = taps.slice(1).map((t, i) => t - taps[i]).sort((a, b) => a - b);
+    const mid = gaps[Math.floor(gaps.length / 2)];
+    const good = gaps.filter((g) => Math.abs(g - mid) < mid * 0.25);
+    const avg = good.reduce((a, b) => a + b, 0) / good.length;
+    tapBpm = 60000 / avg;
+    $("#tap-hint").textContent = taps.length < 8 ? "Getting steadier… keep going" : "Locked in. Keep tapping to fine-tune";
+    showBpm();
+  }
+  $("#tap-pad").addEventListener("pointerdown", (e) => { e.preventDefault(); tap(); });
+  $("#tap-pad").addEventListener("keydown", (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); tap(); } });
+  $("#tap-pad").addEventListener("click", (e) => { if (e.detail === 0) tap(); }); // keyboard activation without pointer
+  $("#tap-half").onclick = () => { if (tapBpm) { tapBpm /= 2; showBpm(); } };
+  $("#tap-double").onclick = () => { if (tapBpm) { tapBpm *= 2; showBpm(); } };
+  $("#tap-reset").onclick = resetTaps;
+  $("#tap-save").onclick = () => {
+    const bpm = Math.round(tapBpm); if (!bpm || !tapTarget) return; const t = tapTarget;
+    if (t.kind === "crate") { const b = beats.find((x) => x.id === t.id); if (b) { const { id, ...rest } = b; saveBeat(id, { ...rest, bpm, bpmTapped: true }); toast("Saved " + bpm + " BPM"); } }
+    else if (t.kind === "result") { const r = results.find((x) => x.videoId === t.videoId); if (r) { r.read.bpm = String(bpm); saveResult(r, { bpmTapped: true }); } }
+    else if (t.kind === "form") { $("#f-bpm").value = bpm; toast("BPM set to " + bpm); }
+    else if (t.kind === "filter") { $("#fl-bpm-min").value = bpm - 5; $("#fl-bpm-max").value = bpm + 5; renderCrate(); toast("Showing beats from " + (bpm - 5) + " to " + (bpm + 5) + " BPM"); }
+    $("#player").close();
+  };
+  $("#player").addEventListener("close", () => { $("#player-frame").innerHTML = ""; tapTarget = null; });
+  $("#f-tap").onclick = () => { const vid = videoId($("#f-url").value); openPlayer(vid, { kind: "form" }); };
+  $("#fl-bpm-tap").onclick = () => openPlayer("", { kind: "filter" });
 
   /* ---------- Manual add / edit ---------- */
   let editingId = null; let lastRead = null;
@@ -289,7 +520,9 @@
       tags: $("#f-tags").value.split(",").map((s) => s.trim()).filter(Boolean), project: $("#f-project").value.trim(), notes: $("#f-notes").value.trim(),
       credit: $("#f-credit").checked, description: $("#f-desc").value.slice(0, 5000), rating: old ? old.rating || 0 : 0, savedAt: old ? old.savedAt : new Date().toISOString()
     });
+    const wasNew = !old || old.videoId !== vid;
     toast(editingId ? "Beat updated" : "Saved to crate"); clearForm();
+    if (wasNew) autoAdd(vid);
   });
 
   /* ---------- Crate ---------- */
@@ -304,7 +537,9 @@
   }
   function filtered() {
     const q = $("#q").value.trim().toLowerCase(), lic = $("#fl-license").value, dl = $("#fl-dl").getAttribute("aria-pressed") === "true", sort = $("#fl-sort").value;
-    const r = beats.filter((b) => (!lic || b.license === lic) && (!dl || b.download) && (!q || [b.title, b.producer, b.artist, b.notes, b.project, (b.tags || []).join(" "), b.key].join(" ").toLowerCase().includes(q)));
+    const lo = parseInt($("#fl-bpm-min").value, 10), hi = parseInt($("#fl-bpm-max").value, 10);
+    const inRange = (b) => (isNaN(lo) && isNaN(hi)) || (b.bpm && (isNaN(lo) || b.bpm >= lo) && (isNaN(hi) || b.bpm <= hi));
+    const r = beats.filter((b) => (!lic || b.license === lic) && (!dl || b.download) && inRange(b) && (!q || [b.title, b.producer, b.artist, b.notes, b.project, (b.tags || []).join(" "), b.key].join(" ").toLowerCase().includes(q)));
     const by = { new: (a, b) => String(b.savedAt).localeCompare(String(a.savedAt)), rating: (a, b) => (b.rating || 0) - (a.rating || 0), bpm: (a, b) => (a.bpm || 999) - (b.bpm || 999), artist: (a, b) => String(a.artist || "").localeCompare(String(b.artist || "")) };
     return r.sort(by[sort]);
   }
@@ -325,16 +560,17 @@
         ${meta ? `<div class="meta">${meta}</div>` : ""}
         <div class="chips">${licenseChips(b.license, b.credit)}${(b.tags || []).map((t) => `<span class="tag t-unk">${esc(t)}</span>`).join("")}</div>
         ${b.notes ? `<p class="notes">${esc(b.notes)}</p>` : ""}
-        <div class="actions">${dl}${yt}<button class="btn small ghost" data-edit="${b.id}">Edit</button>${confirmId === b.id ? `<span class="confirm">Remove? <button class="btn small danger" data-del="${b.id}">Remove</button><button class="btn small ghost" data-cancel="1">Keep</button></span>` : `<button class="btn small ghost" data-ask="${b.id}">Remove</button>`}</div>
+        <div class="actions">${dl}${yt}<button class="btn small ghost" data-tapbpm="${b.id}">${b.bpm ? "Re-tap BPM" : "Tap BPM"}</button><button class="btn small ghost" data-edit="${b.id}">Edit</button>${confirmId === b.id ? `<span class="confirm">Remove? <button class="btn small danger" data-del="${b.id}">Remove</button><button class="btn small ghost" data-cancel="1">Keep</button></span>` : `<button class="btn small ghost" data-ask="${b.id}">Remove</button>`}</div>
       </div></article>`;
     }).join("");
     list.querySelectorAll("canvas").forEach((c) => drawWave(c, c.dataset.seed));
   }
-  ["#q", "#fl-license", "#fl-sort"].forEach((s) => $(s).addEventListener("input", renderCrate));
+  ["#q", "#fl-license", "#fl-sort", "#fl-bpm-min", "#fl-bpm-max"].forEach((s) => $(s).addEventListener("input", renderCrate));
   $("#fl-dl").onclick = (e) => { const c = e.currentTarget; c.setAttribute("aria-pressed", c.getAttribute("aria-pressed") !== "true"); renderCrate(); };
   $("#list").addEventListener("click", (e) => {
     const t = e.target.closest("button"); if (!t) return;
     if (t.dataset.play) play(t.dataset.play);
+    else if (t.dataset.tapbpm) { const b = beats.find((x) => x.id === t.dataset.tapbpm); if (b) openPlayer(b.videoId || "", { kind: "crate", id: b.id }); }
     else if (t.dataset.rate) { const b = beats.find((x) => x.id === t.dataset.id); if (!b) return; const n = +t.dataset.rate; const { id, ...rest } = b; saveBeat(id, { ...rest, rating: b.rating === n ? 0 : n }); }
     else if (t.dataset.ask) { confirmId = t.dataset.ask; renderCrate(); }
     else if (t.dataset.cancel) { confirmId = null; renderCrate(); }
@@ -348,6 +584,8 @@
   });
   window.addEventListener("storage", (e) => { if (e.key === "tb.crate") { beats = loadCrate(); renderCrate(); renderResults(); } });
   renderCrate();
+  updateAuthUI();
+  if (getToken()) loadMine();
 
   /* ---------- Offline shell ---------- */
   if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
