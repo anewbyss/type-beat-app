@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Type Beat</title>
+<meta name="description" content="Scout YouTube for type beats, find free download links and license terms, and keep a crate of saved beats.">
+<meta name="theme-color" content="#0E1016" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ECEEF3" media="(prefers-color-scheme: light)">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Type Beat">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@600;800&family=Work+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="brand"><h1>Type<span>/</span>Beat</h1><button class="btn small ghost" id="open-settings" aria-label="Settings">Settings</button></div>
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" id="tab-scout" aria-selected="true" aria-controls="view-scout">Scout</button>
+    <button class="tab" role="tab" id="tab-crate" aria-selected="false" aria-controls="view-crate">Crate<span class="n" id="crate-count">0</span></button>
+  </div>
+</header>
+
+<main>
+<!-- ============ SCOUT ============ -->
+<div id="view-scout" role="tabpanel">
+  <div class="banner" id="key-banner" hidden>
+    <strong>Add your YouTube API key to start scouting.</strong>
+    <span>It stays on this device only.</span>
+    <button class="btn small primary" id="banner-settings">Add key</button>
+  </div>
+
+  <form class="panel" id="scout-form" novalidate>
+    <label for="artist">Find beats like…<input id="artist" placeholder="Artist name, e.g. Nujabes" autocomplete="off" enterkeyhint="search"></label>
+    <div class="chips" id="mods">
+      <button type="button" class="chip" aria-pressed="true" data-mod="free">Free download</button>
+      <button type="button" class="chip" aria-pressed="false" data-mod="ffp">Free for profit</button>
+      <button type="button" class="chip" aria-pressed="false" data-mod="week">This week</button>
+      <button type="button" class="chip" aria-pressed="false" data-mod="month">This month</button>
+      <button type="button" class="chip" aria-pressed="false" data-mod="new">Newest first</button>
+    </div>
+    <div class="actions"><button class="btn primary" type="submit" id="scout-btn">Scout</button><button class="btn ghost" type="button" id="more-btn" hidden>Load more</button></div>
+    <div class="recent" id="recent"></div>
+  </form>
+
+  <div class="resultbar" id="resultbar" hidden>
+    <span id="result-summary"></span>
+    <button type="button" class="chip" id="only-free" aria-pressed="false">Only free downloads</button>
+  </div>
+  <p class="note" id="scout-msg"></p>
+  <div class="list" id="results"></div>
+
+  <details class="panel manual">
+    <summary>Add a beat by link instead</summary>
+    <form id="add-form" novalidate class="formgrid">
+      <label for="f-url">YouTube link<input id="f-url" inputmode="url" placeholder="https://youtu.be/…"></label>
+      <div class="actions"><button type="button" class="btn small" id="fetch-btn">Fill in from YouTube</button></div>
+      <label for="f-desc">Video description<textarea id="f-desc" placeholder="Filled in automatically, or paste it here."></textarea></label>
+      <div class="detect" id="detect" hidden></div>
+      <div class="row">
+        <label for="f-title">Beat title<input id="f-title"></label>
+        <label for="f-producer">Producer<input id="f-producer"></label>
+      </div>
+      <div class="row3">
+        <label for="f-artist">Type of<input id="f-artist" placeholder="Artist"></label>
+        <label for="f-bpm">BPM<input id="f-bpm" inputmode="numeric"></label>
+        <label for="f-key">Key<input id="f-key" placeholder="A min"></label>
+      </div>
+      <div class="row">
+        <label for="f-license">License
+          <select id="f-license">
+            <option value="unknown">Not sure yet</option>
+            <option value="ffp">Free for profit</option>
+            <option value="nonprofit">Free, non-profit only</option>
+            <option value="lease">Lease or purchase needed</option>
+          </select></label>
+        <label for="f-dl">Download link<input id="f-dl" inputmode="url"></label>
+      </div>
+      <div class="row">
+        <label for="f-tags">Mood tags<input id="f-tags" placeholder="mellow, rainy, jazzy"></label>
+        <label for="f-project">For project<input id="f-project" placeholder="Spoken word set…"></label>
+      </div>
+      <label for="f-notes">Notes<textarea id="f-notes" class="short"></textarea></label>
+      <label class="check"><input type="checkbox" id="f-credit"> Producer asks for credit</label>
+      <div class="actions"><button class="btn primary" type="submit" id="save-btn">Save to crate</button><button class="btn ghost" type="button" id="clear-btn">Clear</button></div>
+      <p class="note" id="form-msg"></p>
+    </form>
+  </details>
+</div>
+
+<!-- ============ CRATE ============ -->
+<div id="view-crate" role="tabpanel" hidden>
+  <div class="filters">
+    <input class="q" id="q" placeholder="Search titles, producers, tags, notes" aria-label="Search crate">
+    <select id="fl-license" aria-label="Filter by license">
+      <option value="">Any license</option><option value="ffp">Free for profit</option><option value="nonprofit">Non-profit only</option><option value="lease">Lease needed</option><option value="unknown">Not sure</option>
+    </select>
+    <select id="fl-sort" aria-label="Sort">
+      <option value="new">Newest saved</option><option value="rating">Top rated</option><option value="bpm">BPM, low to high</option><option value="artist">By artist</option>
+    </select>
+  </div>
+  <div class="chips"><button type="button" class="chip" id="fl-dl" aria-pressed="false">Has download link</button></div>
+  <div class="list" id="list"></div>
+</div>
+</main>
+</div>
+
+<!-- ============ SETTINGS ============ -->
+<dialog id="settings">
+  <form method="dialog" class="formgrid" id="settings-form">
+    <h2>Settings</h2>
+    <label for="api-key">YouTube API key<input id="api-key" type="password" autocomplete="off" placeholder="AIza…"></label>
+    <p class="note">Saved only in this browser on this device. It never goes into the app's code or anywhere except Google.</p>
+    <div class="actions"><button type="button" class="btn primary" id="save-key">Save and test</button><button type="button" class="btn ghost" id="show-key">Show</button></div>
+    <p class="note" id="key-msg"></p>
+    <hr>
+    <h3>Backup</h3>
+    <p class="note">Your crate lives in this browser. Export a backup now and then, or to move it to another device.</p>
+    <div class="actions"><button type="button" class="btn" id="export-btn">Export crate</button><label class="btn" for="import-file">Import backup</label><input type="file" id="import-file" accept="application/json,.json" hidden></div>
+    <p class="note" id="backup-msg"></p>
+    <hr>
+    <div class="actions"><button class="btn" value="close">Done</button></div>
+  </form>
+</dialog>
+
+<dialog id="player">
+  <div class="player-frame" id="player-frame"></div>
+  <form method="dialog" class="actions" style="padding:12px"><button class="btn" value="close">Close</button></form>
+</dialog>
+
+<div class="toast" id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
